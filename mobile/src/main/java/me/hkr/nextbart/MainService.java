@@ -4,6 +4,7 @@ import android.app.Service;
 import android.location.Location;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.Pair;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResultCallback;
@@ -12,19 +13,26 @@ import com.google.android.gms.location.FusedLocationProviderApi;
 import com.google.android.gms.location.LocationListener;
 import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.wearable.MessageApi;
 import com.google.android.gms.wearable.MessageEvent;
 import com.google.android.gms.wearable.Wearable;
 import com.google.android.gms.wearable.WearableListenerService;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.ImmutableBiMap;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
+import com.google.common.util.concurrent.*;
+import me.hkr.shared.AsyncTaskFuture;
+import me.hkr.shared.LocationPayload;
 import me.hkr.shared.PendingResults;
+import us.monoid.json.XML;
 import us.monoid.web.Resty;
+import us.monoid.web.XMLResource;
 
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -36,8 +44,8 @@ public class MainService extends WearableListenerService {
   private final String NORTH_DIRECTION = "n";
   private final String SOUTH_DIRECTION = "s";
 
-  private static final BiMap<String, String> ABREV_TO_FULL =
-      ImmutableBiMap.<String, String>builder()
+  private static final Map<String, String> ABREV_TO_FULL =
+      ImmutableMap.<String, String>builder()
       .put("12th", "12th St. Oakland City Center")
       .put("16th", "16th St. Mission (SF)")
       .put("19th", "19th St. Oakland")
@@ -84,9 +92,58 @@ public class MainService extends WearableListenerService {
       .put("woak",	"West Oakland")
       .build();
 
+  private static final Map<String, LatLng> ABREV_TO_LATLONG =
+      ImmutableMap.<String, LatLng>builder()
+      .put("12th", new LatLng(37.803664, -122.271604))
+      .put("16th", new LatLng(37.765062, -122.419694))
+      .put("19th", new LatLng(37.80787, -122.269029))
+      .put("24th", new LatLng(37.752254, -122.418466))
+      .put("ashb", new LatLng(37.853024, -122.26978))
+      .put("balb", new LatLng(37.72198087, -122.4474142))
+      .put("bayf", new LatLng(37.697185, -122.126871))
+      .put("cast", new LatLng(37.690754, -122.075567))
+      .put("civc", new LatLng(37.779528, -122.413756))
+      .put("cols", new LatLng(37.754006, -122.197273))
+      .put("colm", new LatLng(37.684638, -122.466233))
+      .put("conc", new LatLng(37.973737, -122.029095))
+      .put("daly", new LatLng(37.70612055, -122.4690807))
+      .put("dbrk", new LatLng(37.869867, -122.268045))
+      .put("dubl", new LatLng(37.701695, -121.900367))
+      .put("deln", new LatLng(37.925655, -122.317269))
+      .put("plza", new LatLng(37.9030588, -122.2992715))
+      .put("embr", new LatLng(37.792976, -122.396742))
+      .put("frmt", new LatLng(37.557355, -121.9764))
+      .put("ftvl", new LatLng(37.774963, -122.224274))
+      .put("glen", new LatLng(37.732921, -122.434092))
+      .put("hayw", new LatLng(37.670399, -122.087967))
+      .put("lafy", new LatLng(37.893394, -122.123801))
+      .put("lake", new LatLng(37.797484, -122.265609))
+      .put("mcar", new LatLng(37.828415, -122.267227))
+      .put("mlbr", new LatLng(37.599787, -122.38666))
+      .put("mont", new LatLng(37.789256, -122.401407))
+      .put("nbrk", new LatLng(37.87404, -122.283451))
+      .put("ncon", new LatLng(38.003275, -122.024597))
+      .put("orin", new LatLng(37.87836087, -122.1837911))
+      .put("pitt", new LatLng(38.018914, -121.945154))
+      .put("phil", new LatLng(37.928403, -122.056013))
+      .put("powl", new LatLng(37.784991, -122.406857))
+      .put("rich", new LatLng(37.936887, -122.353165))
+      .put("rock", new LatLng(37.844601, -122.251793))
+      .put("sbrn", new LatLng(37.637753, -122.416038))
+      .put("sfia", new LatLng(37.616035, -122.392612))
+      .put("sanl", new LatLng(37.72261921, -122.1613112))
+      .put("shay", new LatLng(37.63479954, -122.0575506))
+      .put("ssan", new LatLng(37.664174, -122.444116))
+      .put("ucty", new LatLng(37.591208, -122.017867))
+      .put("wcrk", new LatLng(37.905628, -122.067423))
+      .put("wdub", new LatLng(37.699759, -121.928099))
+      .put("woak", new LatLng(37.80467476, -122.2945822))
+      .build();
+
+
   private GoogleApiClient mGoogleApiClient;
 
-  private String shouldSendOnConnect = null;
+  private MessageEvent shouldSendOnConnect = null;
 
   private Resty mResty;
 
@@ -101,7 +158,8 @@ public class MainService extends WearableListenerService {
           public void onConnected(Bundle bundle) {
             Log.d(TAG, "onConnected: " + bundle);
             if (shouldSendOnConnect != null) {
-              sendLocationToWatch(shouldSendOnConnect);
+              Log.d(TAG, "calling sendLocationToWatch");
+              handleMessageEvent(shouldSendOnConnect);
               shouldSendOnConnect = null;
             }
           }
@@ -125,9 +183,79 @@ public class MainService extends WearableListenerService {
     mGoogleApiClient.connect();
   }
 
-  private void sendLocationToWatch(String direction) {
-    getLocationOnce();
-    mResty.xml()
+  private String stationTimesUrl(String station, String direction) {
+    return "http://api.bart.gov/api/etd.aspx?cmd=etd&orig=" + station + "&dir=" + direction + "&key=MW9S-E7SL-26DU-VV8V";
+  }
+
+  private StationDistance closestStation(Location location) {
+    float bestDistance = Float.MAX_VALUE;
+    Map.Entry<String, LatLng> bestEntry = ABREV_TO_LATLONG.entrySet().iterator().next();
+
+    for (Map.Entry<String, LatLng> entry: ABREV_TO_LATLONG.entrySet()) {
+      float[] results = new float[1];
+      Location.distanceBetween(location.getLatitude(),
+          location.getLongitude(),
+          entry.getValue().latitude,
+          entry.getValue().longitude,
+          results);
+      float distance = results[0];
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestEntry = entry;
+      }
+    }
+
+    return new StationDistance(bestEntry.getKey(), bestDistance);
+  }
+
+  private void handleMessageEvent(MessageEvent messageEvent) {
+    if (messageEvent.getPath().endsWith("north")) {
+      sendLocationToWatch(NORTH_DIRECTION, messageEvent.getSourceNodeId());
+    } else if (messageEvent.getPath().endsWith("south")) {
+      sendLocationToWatch(SOUTH_DIRECTION, messageEvent.getSourceNodeId());
+    }
+  }
+
+  private void sendLocationToWatch(final String direction, final String sourceNodeId) {
+    Log.d(TAG, "sending location to watch: " + direction);
+    ListenableFuture<ResponseDistance> reqFuture = Futures.transform(getLocationOnce(), new AsyncFunction<Location, ResponseDistance>() {
+      @Override
+      public ListenableFuture<ResponseDistance> apply(Location location) throws Exception {
+        final StationDistance stationDistance = closestStation(location);
+        Log.d(TAG, "getting result for station: " + stationDistance.station);
+
+        return AsyncTaskFuture.future(new Callable<ResponseDistance>() {
+          @Override
+          public ResponseDistance call() throws Exception {
+            Log.d(TAG, "making xml call");
+            return new ResponseDistance(mResty.xml(stationTimesUrl(stationDistance.station, direction)), stationDistance.distance);
+          }
+        });
+      }
+    });
+
+    Futures.addCallback(reqFuture, new FutureCallback<ResponseDistance>() {
+      @Override
+      public void onSuccess(ResponseDistance responseDistance) {
+        LocationPayload payload = LocationPayload.parseXml(responseDistance.response, responseDistance.distance);
+        if (payload == null) {
+          Log.d(TAG, "Payload is null");
+        } else {
+          Log.d(TAG, "Payload parsed");
+          Wearable.MessageApi.sendMessage(mGoogleApiClient, sourceNodeId, "/newpayload", payload.serialize()).setResultCallback(new ResultCallback<MessageApi.SendMessageResult>() {
+            @Override
+            public void onResult(MessageApi.SendMessageResult sendMessageResult) {
+              Log.d(TAG, "newpayload result: " + sendMessageResult);
+            }
+          });
+        }
+      }
+
+      @Override
+      public void onFailure(Throwable t) {
+        Log.d(TAG, "failed xmlresource with: " + t);
+      }
+    });
   }
 
   private ListenableFuture<Location> getLocationOnce() {
@@ -137,6 +265,7 @@ public class MainService extends WearableListenerService {
             .setNumUpdates(1)
             .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
 
+    Log.d(TAG, "Attempting to get location");
     final SettableFuture<Location> settableFuture = SettableFuture.create();
     LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient,
           request,
@@ -145,12 +274,7 @@ public class MainService extends WearableListenerService {
             public void onLocationChanged(Location location) {
               settableFuture.set(location);
             }
-          }).setResultCallback(new ResultCallback<Status>() {
-      @Override
-      public void onResult(Status status) {
-        Log.d(TAG, "Result callback is: " + status);
-      }
-    });
+          });
     return settableFuture;
   }
 
@@ -158,14 +282,30 @@ public class MainService extends WearableListenerService {
   public void onMessageReceived(MessageEvent messageEvent) {
     Log.d(TAG, "onMessageReceived: " + messageEvent);
 
-    if (messageEvent.getPath().endsWith(NORTH_DIRECTION)) {
-      if (mGoogleApiClient.isConnected()) {
-        sendLocationToWatch(NORTH_DIRECTION);
-      } else {
-        shouldSendOnConnect = NORTH_DIRECTION;
-      }
+    if (mGoogleApiClient.isConnected()) {
+      handleMessageEvent(messageEvent);
     } else {
+      shouldSendOnConnect = messageEvent;
+    }
+  }
 
+  private class StationDistance {
+    public final String station;
+    public final double distance;
+
+    public StationDistance(String station, double distance) {
+      this.station = station;
+      this.distance = distance;
+    }
+  }
+
+  private class ResponseDistance {
+    public final XMLResource response;
+    public final double distance;
+
+    public ResponseDistance(XMLResource response, double distance) {
+      this.response = response;
+      this.distance = distance;
     }
   }
 }
