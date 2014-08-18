@@ -1,5 +1,5 @@
 { 
-  "station": [
+  "stationAbbrev": [
         {
           "name": "12th St. Oakland City Center",
           "abbr": "12TH",

@@ -28,11 +28,11 @@ public class LocationPayload implements Serializable {
     this.ts = ts;
   }
 
-  public static LocationPayload parseXml(XMLResource xmlResource, double distance) {
+  public static LocationPayload parseXml(XMLResource xmlResource, double distance, String stationName) {
     try {
-      String stationName = xmlResource.get("/root/station/name").item(0).getNodeValue();
       NodeList etds = xmlResource.get("//etd");
       ImmutableList.Builder<Train> trainsBuilder = ImmutableList.builder();
+      String destinationName = "";
 
       for (int i = 0; i < etds.getLength(); i++) {
         NodeList etdChildren = etds.item(i).getChildNodes();
@@ -40,7 +40,6 @@ public class LocationPayload implements Serializable {
         for (int j = 0; j < etdChildren.getLength(); j++) {
           Node etdChild = etdChildren.item(j);
           String name = etdChild.getNodeName();
-          String destinationName = "";
           if (name.equals("destination")) {
             destinationName = etdChild.getTextContent();
           } else if (name.equals("estimate")) {

@@ -4,5 +4,6 @@
     <string name="app_name">Next Bart</string>
     <string name="hello_round">Hello Round World!</string>
     <string name="hello_square">Hello Square World!</string>
+    <string name="loading_content">Fetching Bart Info</string>
 
 </resources>

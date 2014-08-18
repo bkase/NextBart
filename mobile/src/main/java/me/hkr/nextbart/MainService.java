@@ -1,15 +1,12 @@
 package me.hkr.nextbart;
 
-import android.app.Service;
 import android.location.Location;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.Log;
-import android.util.Pair;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResultCallback;
-import com.google.android.gms.common.api.Status;
-import com.google.android.gms.location.FusedLocationProviderApi;
 import com.google.android.gms.location.LocationListener;
 import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationServices;
@@ -18,28 +15,21 @@ import com.google.android.gms.wearable.MessageApi;
 import com.google.android.gms.wearable.MessageEvent;
 import com.google.android.gms.wearable.Wearable;
 import com.google.android.gms.wearable.WearableListenerService;
-import com.google.common.collect.BiMap;
-import com.google.common.collect.ImmutableBiMap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.*;
 import me.hkr.shared.AsyncTaskFuture;
 import me.hkr.shared.LocationPayload;
-import me.hkr.shared.PendingResults;
-import us.monoid.json.XML;
 import us.monoid.web.Resty;
 import us.monoid.web.XMLResource;
 
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.*;
 
 /**
  * Created by bkase on 8/10/14.
  */
 public class MainService extends WearableListenerService {
-  private final String TAG = this.getClass().getName();
+  private static final String TAG = MainService.class.getName();
 
   private final String NORTH_DIRECTION = "n";
   private final String SOUTH_DIRECTION = "s";
@@ -147,10 +137,13 @@ public class MainService extends WearableListenerService {
 
   private Resty mResty;
 
+  private Handler mHandler;
+
   @Override
   public void onCreate() {
     super.onCreate();
 
+    mHandler = new Handler();
     mResty = new Resty();
     mGoogleApiClient = new GoogleApiClient.Builder(this)
         .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
@@ -218,26 +211,33 @@ public class MainService extends WearableListenerService {
 
   private void sendLocationToWatch(final String direction, final String sourceNodeId) {
     Log.d(TAG, "sending location to watch: " + direction);
-    ListenableFuture<ResponseDistance> reqFuture = Futures.transform(getLocationOnce(), new AsyncFunction<Location, ResponseDistance>() {
+    ListenableFuture<ResponseStationInfo> reqFuture = Futures.transform(getLocationOnce(), new AsyncFunction<Location, ResponseStationInfo>() {
       @Override
-      public ListenableFuture<ResponseDistance> apply(Location location) throws Exception {
+      public ListenableFuture<ResponseStationInfo> apply(Location location) throws Exception {
         final StationDistance stationDistance = closestStation(location);
-        Log.d(TAG, "getting result for station: " + stationDistance.station);
+        Log.d(TAG, "getting result for stationAbbrev: " + stationDistance.station);
 
-        return AsyncTaskFuture.future(new Callable<ResponseDistance>() {
+        return AsyncTaskFuture.future(new Callable<ResponseStationInfo>() {
           @Override
-          public ResponseDistance call() throws Exception {
+          public ResponseStationInfo call() throws Exception {
             Log.d(TAG, "making xml call");
-            return new ResponseDistance(mResty.xml(stationTimesUrl(stationDistance.station, direction)), stationDistance.distance);
+            return new ResponseStationInfo(
+                mResty.xml(stationTimesUrl(stationDistance.station, direction)),
+                stationDistance.distance,
+                stationDistance.station);
           }
         });
       }
     });
 
-    Futures.addCallback(reqFuture, new FutureCallback<ResponseDistance>() {
+    Futures.addCallback(reqFuture, new FutureCallback<ResponseStationInfo>() {
       @Override
-      public void onSuccess(ResponseDistance responseDistance) {
-        LocationPayload payload = LocationPayload.parseXml(responseDistance.response, responseDistance.distance);
+      public void onSuccess(ResponseStationInfo responseStationInfo) {
+        LocationPayload payload = LocationPayload.parseXml(
+            responseStationInfo.response,
+            responseStationInfo.distance,
+            ABREV_TO_FULL.get(responseStationInfo.stationAbbrev)
+        );
         if (payload == null) {
           Log.d(TAG, "Payload is null");
         } else {
@@ -259,22 +259,39 @@ public class MainService extends WearableListenerService {
   }
 
   private ListenableFuture<Location> getLocationOnce() {
+    return Futures.withFallback(getHighAccuracyLocationOnce(), new FutureFallback<Location>() {
+      @Override
+      public ListenableFuture<Location> create(Throwable t) throws Exception {
+        return Futures.immediateFuture(LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient));
+      }
+    });
+  }
+
+  private ListenableFuture<Location> getHighAccuracyLocationOnce() {
+    final int EXPIRATION_TIMEOUT_MS = 5 * 1000;
+
     LocationRequest request =
         LocationRequest.create()
-            .setExpirationDuration(10 * 1000)
+            .setExpirationDuration(EXPIRATION_TIMEOUT_MS)
             .setNumUpdates(1)
             .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
 
     Log.d(TAG, "Attempting to get location");
     final SettableFuture<Location> settableFuture = SettableFuture.create();
-    LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient,
-          request,
-          new LocationListener() {
-            @Override
-            public void onLocationChanged(Location location) {
-              settableFuture.set(location);
-            }
-          });
+    final LocationListener LOCATION_LISTENER = new LocationListener() {
+      @Override
+      public void onLocationChanged(Location location) {
+        settableFuture.set(location);
+      }
+    };
+    LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient, request, LOCATION_LISTENER);
+    mHandler.postDelayed(new Runnable() {
+      @Override
+      public void run() {
+        LocationServices.FusedLocationApi.removeLocationUpdates(mGoogleApiClient, LOCATION_LISTENER);
+        settableFuture.setException(new TimeoutException());
+      }
+    }, EXPIRATION_TIMEOUT_MS);
     return settableFuture;
   }
 
@@ -299,13 +316,15 @@ public class MainService extends WearableListenerService {
     }
   }
 
-  private class ResponseDistance {
+  private class ResponseStationInfo {
     public final XMLResource response;
     public final double distance;
+    public final String stationAbbrev;
 
-    public ResponseDistance(XMLResource response, double distance) {
+    public ResponseStationInfo(XMLResource response, double distance, String stationAbbrev) {
       this.response = response;
       this.distance = distance;
+      this.stationAbbrev = stationAbbrev;
     }
   }
 }
